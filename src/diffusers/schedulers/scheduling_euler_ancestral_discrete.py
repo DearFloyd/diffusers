@@ -356,3 +356,46 @@ class EulerAncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
     def __len__(self):
         return self.config.num_train_timesteps
+
+    def get_pred_original_sample(self,
+                                 model_output: torch.FloatTensor,
+                                 timestep: Union[float, torch.FloatTensor],
+                                 sample: torch.FloatTensor):
+        if isinstance(timestep, torch.Tensor):
+            timestep = timestep.to(self.timesteps.device)
+
+        step_index = (self.timesteps == timestep).nonzero().item()
+        sigma = self.sigmas[step_index]
+
+        # 1. compute predicted original sample (x_0) from sigma-scaled predicted noise
+        return sample - sigma * model_output
+
+    def webui_step(self,
+                   pred_original_sample: torch.FloatTensor,
+                   timestep: Union[float, torch.FloatTensor],
+                   sample: torch.FloatTensor,
+                   generator: Optional[torch.Generator] = None):
+        if isinstance(timestep, torch.Tensor):
+            timestep = timestep.to(self.timesteps.device)
+
+        step_index = (self.timesteps == timestep).nonzero().item()
+        sigma = self.sigmas[step_index]
+
+        sigma_from = self.sigmas[step_index]
+        sigma_to = self.sigmas[step_index + 1]
+        sigma_up = (sigma_to ** 2 * (sigma_from ** 2 - sigma_to ** 2) / sigma_from ** 2) ** 0.5
+        sigma_down = (sigma_to ** 2 - sigma_up ** 2) ** 0.5
+
+        # 2. Convert to an ODE derivative
+        derivative = (sample - pred_original_sample) / sigma
+
+        dt = sigma_down - sigma
+
+        prev_sample = sample + derivative * dt
+
+        device = pred_original_sample.device
+        noise = randn_tensor(pred_original_sample.shape, dtype=pred_original_sample.dtype, device=device, generator=generator)
+
+        prev_sample = prev_sample + noise * sigma_up
+
+        return prev_sample
