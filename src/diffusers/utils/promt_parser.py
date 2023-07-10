@@ -1,3 +1,5 @@
+import os
+from os.path import splitext, join
 import re
 import torch
 from collections import namedtuple
@@ -8,11 +10,37 @@ id_pad = 49407
 chunk_length = 75
 comma_token = 267
 comma_padding_backtrack = 20
+# textual inversion
+ids_lookup = dict()
+
+
+def load_webui_textual_inversion(embeddings_dir, pipeline):
+    assert os.path.exists(embeddings_dir)
+    global ids_lookup
+    file_list = [a for a in os.listdir(embeddings_dir) if splitext(
+        a)[-1].lower() in ['.pt', '.bin', '.safetensors']]
+
+    for file_name in file_list:
+        name = splitext(file_name)[0]
+        # load textual inversion embeddings
+        end_id_old = len(pipeline.tokenizer)
+        pipeline.load_textual_inversion(join(embeddings_dir, file_name), name)
+        end_id_new = len(pipeline.tokenizer)
+        # register embedding
+        ids = pipeline.tokenizer([name],
+                                 truncation=False, add_special_tokens=False)["input_ids"][0]
+        first_id = ids[0]
+        embeddings_ind = [ind for ind in range(end_id_old, end_id_new)]
+        if first_id not in ids_lookup:
+            ids_lookup[first_id] = [(ids, embeddings_ind)]
+        else:
+            ids_lookup[first_id].append((ids, embeddings_ind))
+
+    return ids_lookup
 
 
 def get_promt_embedding(pos_prompt, tokenizer, text_encoder, device=torch.device("cpu")):
     batch_chunks, token_count = process_texts([pos_prompt], tokenizer)
-    used_embeddings = {}
     chunk_count = max([len(x) for x in batch_chunks])
 
     zs = []
@@ -21,20 +49,9 @@ def get_promt_embedding(pos_prompt, tokenizer, text_encoder, device=torch.device
 
         tokens = [x.tokens for x in batch_chunk]
         multipliers = [x.multipliers for x in batch_chunk]
-        fixes = [x.fixes for x in batch_chunk]
-
-        for fix in fixes:
-            for _position, embedding in fix:
-                used_embeddings[embedding.name] = embedding
 
         z = process_tokens(tokens, multipliers, text_encoder, device)
         zs.append(z)
-
-    if len(used_embeddings) > 0:
-        # TODO:
-        comments = []
-        embeddings_list = ", ".join([f'{name} [{embedding.checksum()}]' for name, embedding in used_embeddings.items()])
-        comments.append(f"Used embeddings: {embeddings_list}")
 
     return torch.hstack(zs)
 
@@ -119,7 +136,6 @@ def tokenize_line(line, tokenizer, enable_emphasis=True):
 
             if token == comma_token:
                 last_comma = len(chunk.tokens)
-
             # this is when we are at the end of alloted 75 tokens for the current chunk, and the current token is not a comma. opts.comma_padding_backtrack
             # is a setting that specifies that if there is a comma nearby, the text after the comma should be moved out of this chunk and into the next.
             elif comma_padding_backtrack != 0 and len(
@@ -140,21 +156,18 @@ def tokenize_line(line, tokenizer, enable_emphasis=True):
             if len(chunk.tokens) == chunk_length:
                 next_chunk()
 
-            embedding, embedding_length_in_tokens = find_embedding_at_position(tokens, position)
-            if embedding is None:
+            embedding_ind, embedding_length_in_tokens = find_embedding_at_position(tokens, position)
+            if embedding_ind is None:
                 chunk.tokens.append(token)
                 chunk.multipliers.append(weight)
                 position += 1
                 continue
 
-            emb_len = int(embedding.vec.shape[0])
-            if len(chunk.tokens) + emb_len > chunk_length:
+            if len(chunk.tokens) + len(embedding_ind) > chunk_length:
                 next_chunk()
 
-            chunk.fixes.append(PromptChunkFix(len(chunk.tokens), embedding))
-
-            chunk.tokens += [0] * emb_len
-            chunk.multipliers += [weight] * emb_len
+            chunk.tokens += embedding_ind
+            chunk.multipliers += [weight] * len(embedding_ind)
             position += embedding_length_in_tokens
 
     if chunk.tokens or not chunks:
@@ -276,16 +289,14 @@ def parse_prompt_attention(text):
 
 def find_embedding_at_position(tokens, offset):
     token = tokens[offset]
-    # TODO:
-    ids_lookup = dict()
     possible_matches = ids_lookup.get(token, None)
 
     if possible_matches is None:
         return None, None
 
-    for ids, embedding in possible_matches:
+    for ids, embedding_ind in possible_matches:
         if tokens[offset:offset + len(ids)] == ids:
-            return embedding, len(ids)
+            return embedding_ind, len(ids)
 
     return None, None
 

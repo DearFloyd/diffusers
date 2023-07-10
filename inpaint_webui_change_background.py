@@ -9,7 +9,7 @@ from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_controlnet i
 from diffusers import WebUIStableDiffusionControlNetInpaintPipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler
 import extensions.ESRGAN.test as esrgan
-from diffusers.utils.promt_parser import get_promt_embedding
+from diffusers.utils.promt_parser import get_promt_embedding, load_webui_textual_inversion
 
 
 def get_fixed_seed(seed):
@@ -62,20 +62,22 @@ root_dir = "/xsl/wilson.xu/weights"
 base_path = f"{root_dir}/CyberRealistic_V3.0-FP32"
 canny_path = f"{root_dir}/control_v11p_sd15_canny"
 face_restored_path = f"{root_dir}/codeformer-v0.1.0.pth"
+device = torch.device("cuda")
 
-canny_model = ControlNetModel.from_pretrained(canny_path, torch_dtype=torch.float16).to("cuda")
+canny_model = ControlNetModel.from_pretrained(canny_path, torch_dtype=torch.float16).to(device)
 controlnet = MultiControlNetModel([canny_model])
 
 pipe_control = WebUIStableDiffusionControlNetInpaintPipeline.from_pretrained(
-    base_path, controlnet=controlnet, torch_dtype=torch.float16).to('cuda')
+    base_path, controlnet=controlnet, torch_dtype=torch.float16).to(device)
 pipe_control.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe_control.scheduler.config)
 # pipe_control.load_textual_inversion("embedding")
+load_webui_textual_inversion("embedding", pipe_control)
 
 prompt = "bokeh,outdoors background,clear background, beautiful light, best quality, masterpiece, ultra highres, very detailed skin, photorealistic, masterpiece, very high detailed,4k, 8k, 64k,photo detail"
 negative_prompt = "floor reflection, tilt, people, ((messy hair:2)), tree, ((light at background)), human, ((no peoples background)), ((sun)),((backlight)), ((light above the head)), ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, 3 ear, 4 ear, bad anatomy,((cross-eyed)), bad hands, bad feet, ((watermark:2)),((logo:2)), (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body"
 
 # prompt_embedding
-pos_prompt_embs, neg_prompt_embs = prompt_preprocess(prompt, negative_prompt, pipe_control)
+pos_prompt_embs, neg_prompt_embs = prompt_preprocess(prompt, negative_prompt, pipe_control, device)
 
 
 input_size = (1024, 1024)
